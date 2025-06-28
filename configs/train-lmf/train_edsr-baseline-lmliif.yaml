@@ -1,0 +1,113 @@
+train_dataset:
+  dataset:
+    name: dem-folder
+    args:
+      root_path: /content/drive/MyDrive/LMFDatas/pyrenees/train
+      #root_path: /content/drive/MyDrive/LMFDatas/test
+
+      #root_path: /kaggle/input/demsrcodes/pyrenees/train
+      repeat: 1
+      transM: dem2one
+      cache: in_memory
+  wrapper:
+    name: dem-implicit-downsampled
+    args:
+      # type: trend # dem baseline 
+      inp_size: 24
+      scale_max: 8
+      augment: true
+      sample_q: 576 #576 #2304 为0时直接调用query_rgb_fast, 输入形状不变
+      # coloss:True #qumu
+  batch_size: 32
+
+val_dataset:
+  dataset:
+    name: dem-folder
+    args:
+      root_path: /content/drive/MyDrive/LMFDatas/pyrenees/test
+      #root_path: /content/drive/MyDrive/LMFDatas/test
+
+      #root_path: /kaggle/input/demsrcodes/pyrenees/test
+      first_k: 20
+      repeat: 3
+      transM: dem2one
+      cache: in_memory
+  wrapper:
+    name: dem-implicit-downsampled
+    args:
+      inp_size: 24 #24 #48
+      scale_max: 8 #8 #4
+      sample_q: #2304
+      coloss: False
+      augment: false
+  batch_size: 32
+trend: false   #使用高程趋势面和高程残差进行训练 qumu
+coloss: False 
+data_norm:
+  norm_on: true
+  inp:
+    sub:
+    - 0.5
+    div:
+    - 0.5
+  gt:
+    sub:
+    - 0.5
+    div:
+    - 0.5
+model:
+  name: lmliif
+  args:
+    encoder_spec:
+      name: edsr-trend-baseline
+      args:
+        no_upsampling: true
+        spatialatt: true
+        n_feats: 64
+        n_colors: 1
+        conv_type: default #adapdi   #default、 deform 
+        dilation: 1
+
+    hypernet_spec:
+      name: mlp
+      args:
+        out_dim: 208
+        hidden_list: [ 208 ]
+    local_ensemble: True
+    feat_unfold: True
+    cell_decode: True
+    mod_input: True
+    max_scale: 8
+    imnet_spec:
+      name: lmmlp
+      args:
+        out_dim: 1
+        hidden_dim: 16
+        hidden_depth: 6
+        mod_scale: True
+        mod_shift: True
+
+        
+    posEmbeder_spec:
+      name: posembeder
+      args:
+        n_harmonic_functions: 16
+        
+
+optimizer:
+  name: adamW
+  args:
+    lr: 1.0e-3
+epoch_max: 200
+multi_step_lr:
+  milestones: [50, 100, 140, 180,200]
+  # milestones: [100, 400, 600, 800, 1000]
+
+  gamma: 0.5
+
+schedule_lr_type: cosplateau # multistep cosine plateau # qumu
+epoch_val: 10
+#eval_type: DEM
+#epoch_val: 20
+epoch_save: 30
+resume: .save/epoch-325-pyrenees.pth
