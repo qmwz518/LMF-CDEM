@@ -3,9 +3,8 @@ train_dataset:
     name: dem-folder
     args:
       #root_path: /content/drive/MyDrive/LMFDatas/pyrenees/train
-      root_path: /content/drive/MyDrive/LMFDatas/test
-
-      #root_path: /kaggle/input/demsrcodes/pyrenees/train
+      # root_path: /content/drive/MyDrive/LMFDatas/test
+      root_path: /kaggle/input/demsrcodes/pyrenees/train
       repeat: 1
       transM: dem2one
       cache: in_memory
@@ -13,21 +12,21 @@ train_dataset:
     name: dem-implicit-downsampled
     args:
       # type: trend # dem baseline 
-      inp_size: 48
-      scale_max: 4
+      inp_size: 24
+      scale_max: 8
       augment: true
-      sample_q: 48 #576 #2304 为0时直接调用query_rgb_fast, 输入形状不变
+      sample_q: 24 #576 #2304 为0时直接调用query_rgb_fast, 输入形状不变
       # coloss:True #qumu
-  batch_size: 2
+  batch_size: 32
 
 val_dataset:
   dataset:
     name: dem-folder
     args:
       #root_path: /content/drive/MyDrive/LMFDatas/pyrenees/test
-      root_path: /content/drive/MyDrive/LMFDatas/test
+      # root_path: /content/drive/MyDrive/LMFDatas/test
 
-      #root_path: /kaggle/input/demsrcodes/pyrenees/test
+      root_path: /kaggle/input/demsrcodes/pyrenees/test
       first_k: 20
       repeat: 3
       transM: dem2one
@@ -35,12 +34,12 @@ val_dataset:
   wrapper:
     name: dem-implicit-downsampled
     args:
-      inp_size: 48 #24 #48
-      scale_max: 4 #8 #4
-      sample_q: 48 #28*28=576 # 48*48 = 2304
+      inp_size: 24 #24 #48
+      scale_max: 8 #8 #4
+      sample_q: 24 #28*28=576 # 48*48 = 2304
       #coloss: false
       augment: false
-  batch_size: 2
+  batch_size: 32
 trend: false   #true   #使用高程趋势面和高程残差进行训练 qumu
 bQBias: false
 coloss: true  # 
