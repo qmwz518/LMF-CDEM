@@ -65,7 +65,7 @@ model:
         spatialatt: true
         n_feats: 32
         n_colors: 1
-        conv_type: default #adapdi   #default deform 
+        conv_type: default #adapdi  fdconv default deform 
         dilation: 1
 
     hypernet_spec:

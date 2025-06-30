@@ -1,4 +1,4 @@
-"""
+git"""
 Modified from: https://github.com/thstkdgus35/EDSR-PyTorch
 """
 
@@ -13,6 +13,7 @@ from models import register
 
 from torchvision.ops import DeformConv2d
 
+from models.FDConv import FDConv
 # qumu
 class DeformableConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
@@ -91,18 +92,23 @@ class AdaptiveDilatedBlock(nn.Module):
 def default_conv(in_channels, out_channels, kernel_size, Bias=True, Dilation = 1):
     return nn.Conv2d(
         in_channels, out_channels, kernel_size,
-        padding=(Dilation * (kernel_size - 1) // 2), dilation=Dilation, bias=Bias)
+        padding=(kernel_size//2), dilation=Dilation, bias=Bias)
+
+def fd_conv(in_channels, out_channels, kernel_size, Bias=True, Dilation = 1):
+    return FDConv(
+        in_channels, out_channels, kernel_size,
+        padding=(kernel_size//2), dilation=Dilation, bias=Bias)
 
 
-class MeanShift(nn.Conv2d):
-    def __init__(self, rgb_range, rgb_mean=(0.4488, 0.4371, 0.4040), rgb_std=(1.0, 1.0, 1.0), sign=-1):
+# class MeanShift(nn.Conv2d):
+#     def __init__(self, rgb_range, rgb_mean=(0.4488, 0.4371, 0.4040), rgb_std=(1.0, 1.0, 1.0), sign=-1):
 
-        super(MeanShift, self).__init__(3, 3, kernel_size=1)
-        std = torch.Tensor(rgb_std)
-        self.weight.data = torch.eye(3).view(3, 3, 1, 1) / std.view(3, 1, 1, 1)
-        self.bias.data = sign * rgb_range * torch.Tensor(rgb_mean) / std
-        for p in self.parameters():
-            p.requires_grad = False
+#         super(MeanShift, self).__init__(3, 3, kernel_size=1)
+#         std = torch.Tensor(rgb_std)
+#         self.weight.data = torch.eye(3).view(3, 3, 1, 1) / std.view(3, 1, 1, 1)
+#         self.bias.data = sign * rgb_range * torch.Tensor(rgb_mean) / std
+#         for p in self.parameters():
+#             p.requires_grad = False
 
 
 
@@ -127,7 +133,6 @@ class ResBlock(nn.Module):
         res = self.body(x).mul(self.res_scale)
         if self.sa is not None:
           res = self.sa(res)
-
         res += x
         return res
 
@@ -183,10 +188,9 @@ class EDSR(nn.Module):
         act = nn.ReLU(True)
         sa = args.spatialatt
         dilation = args.dilation 
-
         bias = True
         url_name = 'r{}f{}x{}'.format(n_resblocks, n_feats, scale)
-        print(url_name)#qumu
+        # print(f'erdsSD183 n_feats={n_feats}')#qumu
         if url_name in url:
             self.url = url[url_name]
         else:
@@ -194,8 +198,10 @@ class EDSR(nn.Module):
         # self.sub_mean = MeanShift(args.rgb_range)
         # self.add_mean = MeanShift(args.rgb_range, sign=1)
 
+        # define head module
+        # m_head = [conv(args.n_colors, n_feats, kernel_size)]
         m_head = [nn.Conv2d(args.n_colors, n_feats, kernel_size,
-        padding=(kernel_size//2),bias=bias)]
+        padding=(kernel_size//2), dilation=dilation,bias=bias)]
 
         # define body module
         m_body = [
@@ -223,9 +229,9 @@ class EDSR(nn.Module):
         x = self.head(x)
         res = self.body(x)
         res += x
-        # print(' res.shape',res.shape, ' ','trend.shape=',trend.shape)
+
         if trend is not None:
-            res += trend   #if not self.args.bQBias else 0 # qumud
+            res += trend # qumud
         if not self.args.no_upsampling:
             res = self.tail(res)
         #x = self.add_mean(x)
@@ -253,7 +259,7 @@ class EDSR(nn.Module):
 
 @register('edsr-trend-baseline')
 def make_edsr_baseline(n_resblocks=16, n_colors=1, n_feats=64, res_scale=1,
-                       scale=4, no_upsampling=False, rgb_range=1,spatialatt=True,conv_type='default',bQBias = False,dilation=1):
+                       scale=4, no_upsampling=False, rgb_range=1,spatialatt=True,conv_type='default',dilation=1):
     args = Namespace()
     args.n_resblocks = n_resblocks
     args.n_feats = n_feats
@@ -265,9 +271,10 @@ def make_edsr_baseline(n_resblocks=16, n_colors=1, n_feats=64, res_scale=1,
     args.rgb_range = rgb_range
     args.n_colors = n_colors
     args.dilation = dilation
-    args.bQBias = bQBias
     if conv_type == 'default':
       return EDSR(args)
+    elif conv_type == 'fdconv':
+      return EDSR(args, conv=fd_conv)
     elif conv_type == 'adapdi':
       return EDSR(args, conv=AdaptiveDilatedConv)
     elif conv_type == 'deform':
