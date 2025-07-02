@@ -134,7 +134,7 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
                 pred = model(inp, coord, cell*max(scale/scale_max, 1), batch.get('DEMtrend'))
         else:
             if fast:
-                print('test130  if fast::')``
+                print('test137  if fast::')
                 with torch.no_grad():
                     pred = model(inp, coord, cell*max(scale/scale_max, 1),batch.get('DEMtrend'))
             else:
@@ -143,7 +143,7 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
         # print('pred.min()=',pred.min())   
         pred_denorm = pred * gt_div + gt_sub if norm_on else pred
         # print('test43 gt_div=',gt_div.numpy(),'pred.min()=',pred.min())
-        pred_denorm.clamp_(0, 1)
+        # pred_denorm.clamp_(0, 1)
 
         # save sr image
         save_folder = save_folder if save_folder is not None else eval_type
