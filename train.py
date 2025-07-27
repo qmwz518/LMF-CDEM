@@ -1,11 +1,15 @@
 import argparse
 import os
 import math
-
+from tkinter import Scale
+import numpy as np
+import random
 import yaml
+from tqdm import tqdm
+import datetime
 import torch
 import torch.nn as nn
-from tqdm import tqdm
+
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
@@ -18,7 +22,7 @@ import utils
 from test import eval_psnr
 from utils import get_Device, plot_dem
 
-import torch
+
 
 def format_time(lasttime):
     # 提取小时和分钟
@@ -34,11 +38,11 @@ def format_time(lasttime):
 class SIML1Loss(nn.Module):
     def __init__(
         self,
-        alpha=0.84,
+        alpha=0.84,     #diffloss和simloss的权重
         data_range=1.0,
         channel=1,
         ssim_mode="ssim",  # 新增模式选择参数
-        win_size=3,
+        win_size=7,
         weights=None,
     ):
         super().__init__()
@@ -249,18 +253,26 @@ def train(train_loader, model, optimizer, epoch): #utils.calc_psnr
     coloss = config.get('coloss') 
     btrend =  config.get('trend')
     bQBias = config.get('bQBias')  #预测趋势残差值 
-  
-
+    loss_type = None
+    
+    data_norm = config['data_norm']
+    norm_on = data_norm['norm_on']
+    scale = data_norm['model']['args']['max_scale']
 
     metric_fn = utils.calc_dem_metrics
     device, bGPU = get_Device()
     train_loss = utils.Averager()
     train_psnr = utils.Averager()
     train_msssim =  utils.Averager()
-    
-    data_norm = config['data_norm']
-    norm_on = data_norm['norm_on']
-    loss_fn = SIML1Loss() if coloss else nn.L1Loss()
+
+    if coloss:
+        loss_type = config.get('loss_type')
+        if loss_type == 'DEMGeoFeatsHybridLoss':
+            loss_fn = utils.DEMGeoFeatsHybridLoss()
+        else:
+            loss_fn = SIML1Loss()
+    else:
+        loss_fn = nn.L1Loss()
     t = data_norm['inp']
     inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).to(device, non_blocking=bGPU)
     inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).to(device, non_blocking=bGPU)
@@ -285,30 +297,27 @@ def train(train_loader, model, optimizer, epoch): #utils.calc_psnr
           inp = (batch['inp'] - inp_sub) / inp_div if norm_on else batch['inp']
           pred = model(inp, batch['coord'], batch['cell'])
           pred_denorm = pred * gt_div + gt_sub if norm_on else pred
-          pred_denorm.clamp_(0, 1) # by qumu ???
+        #   pred_denorm.clamp_(0, 1) # by qumu ???2025年7月9日
         else:
           #bQBias 时pred是预测的高程残差值
           inp = batch['inp']
-          Trend = batch.get('DEMtrend') if not bQBias else None
-
+          Trend = batch.get('DEMtrend')
           pred = model(inp, batch['coord'], batch['cell'], Trend)
           pred_denorm = (torch.tanh(pred) + 1) / 2 if not bQBias else pred # 0-1  
            
         # 损失计算
-        if coloss:
-            if btrend == True and bQBias:
-              hrTrend = batch.get('hrDEMtrend')
 
-              loss, ms_ssim_loss, l1_loss = loss_fn(pred, gt - hrTrend)
-            else:
-              loss, ms_ssim_loss, l1_loss = loss_fn(pred_denorm, gt)
+        if bQBias:
+            hrBase = batch.get('hrBasedem')
+            # loss, ms_ssim_loss, l1_loss = loss_fn(pred, gt - hrBase)
+            All_loss = loss_fn(pred, gt - hrBase)
         else:
-            if btrend == True and bQBias:
-              hrTrend = batch.get('hrDEMtrend')
-              loss = loss_fn(pred, gt - hrTrend)
-            else:
-              loss = loss_fn(pred_denorm, gt)
-        
+            All_loss = loss_fn(pred_denorm, gt)
+
+        if coloss:
+            loss, ms_ssim_loss, l1_loss = All_loss
+        else:
+            loss = All_loss
         # 反向传播与参数更新
         optimizer.zero_grad()
         loss.backward()
@@ -316,13 +325,15 @@ def train(train_loader, model, optimizer, epoch): #utils.calc_psnr
         optimizer.step()
         
         # 指标计算与记录
-        PSNR = metric_fn(pred, gt, OnlyPSNR=True)
+        # PSNR = metric_fn(pred, gt, OnlyPSNR=True)
+        #这里如何不是coloss，则在训练阶段使用的是flatten的数据，则scale为None，否则为scale
+        PSNR = utils.calc_psnr(pred_denorm, gt, scale=scale if coloss else None,data_range=1.0)
         writer.add_scalars('Loss', {'train': loss.item()}, (epoch-1)*iter_per_epoch + iteration)
         writer.add_scalars('PSNR', {'train': PSNR}, (epoch-1)*iter_per_epoch + iteration)
         iteration += 1
         train_psnr.add(PSNR)
         train_loss.add(loss.item())
-        train_msssim.add(ms_ssim_loss.item()) if coloss else 0
+        train_msssim.add(1 - ms_ssim_loss.item()) if coloss else 0
     if coloss:
       return train_loss.item(), train_psnr.item(),train_msssim.item() # 假设使用平均而非最后值
     else:
@@ -348,9 +359,7 @@ def main(config_, save_path):
     else:
       print(config.get('data_norm'))
       data_norm = config['data_norm']
-      # print('*'*40)
-      # print('data_norm[norm_on]:',data_norm['norm_on'])
-    
+  
     model, optimizer, epoch_start, lr_scheduler = prepare_training()
 
     n_gpus = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
@@ -365,37 +374,54 @@ def main(config_, save_path):
     epoch_save = config.get('epoch_save')
     max_val_v = -1e18
 
-
     btrend =  config.get('trend')
-    bQBias = config.get('bQBias')  #预测趋势残差值 
+    optim_sche = config.get('schedule_lr_type')
+    local_ensemble = config['model']['args']['local_ensemble']   
+    ensemAlpha = config['model']['args']['ensemAlpha'] 
     spatialatt = config['model']['args']['encoder_spec']['args']['spatialatt']
+    n_feats = config['model']['args']['encoder_spec']['args']['n_feats']
+    n_resblocks = config['model']['args']['encoder_spec']['args']['n_resblocks']
     conv_type = config['model']['args']['encoder_spec']['args']['conv_type']
-    print('btrend =',btrend,' spatialatt =',spatialatt, 'conv_type =',conv_type,' bQBias =',bQBias)
+    model_info = 'ensemble='+str(local_ensemble)+'_opti_='+ optim_sche+'_n_resblocks='+str(n_resblocks)+'_n_feats='+str(n_feats)+ '_btrend='+  str(btrend)+'_spatialatt='+str(spatialatt)+ '_conv_type='+conv_type
+    print(model_info)
 
+    seed = 10
+    torch.manual_seed(seed)  # 为CPU设置随机种子
+    torch.cuda.manual_seed(seed)  # 为当前GPU设置随机种子
+    torch.cuda.manual_seed_all(seed)  # 为所有GPU设置随机种子
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # btrend =  config.get('trend')
+    # bQBias = config.get('bQBias')  #预测趋势残差值 
+    # spatialatt = config['model']['args']['encoder_spec']['args']['spatialatt']
+    # conv_type = config['model']['args']['encoder_spec']['args']['conv_type']
+    # print('btrend =',btrend,' spatialatt =',spatialatt, 'conv_type =',conv_type,' bQBias =',bQBias)
+    day = datetime.datetime.now().strftime('%y%m%d%H')
     timer = utils.Timer()
 
     for epoch in range(epoch_start, epoch_max + 1):
         t_epoch_start = timer.t()
         log_info = ['epoch {}/{}'.format(epoch, epoch_max)]
 
-
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
         if coloss:
-          train_loss, train_psnr,train_mssim = train(train_loader, model, optimizer, epoch)
-        else: train_loss, train_psnr = train(train_loader, model, optimizer, epoch)
+            train_loss, train_psnr, train_mssim = train(train_loader, model, optimizer, epoch)
+        else: 
+            train_loss, train_psnr = train(train_loader, model, optimizer, epoch)
 
         if lr_scheduler is not None:  #qumu 330
             #cosplateau # stepLR cosine plateau
-            lr_scheduler.step(val_loss= train_loss) if  scheduler_lr_type == 'cosplateau' else  lr_scheduler.step() 
+            lr_scheduler.step(val_lss= train_loss) if  scheduler_lr_type == 'cosplateau' else  lr_scheduler.step() 
 
         log_info.append('train: loss={:.6f}'.format(train_loss))
         writer.add_scalars('loss', {'train': train_loss}, epoch)
         log_info.append('train: psnr={:.6f}'.format(train_psnr))
         writer.add_scalars('psnr', {'train': train_psnr}, epoch)
         if coloss:
-          sim = 1-train_mssim
-          log_info.append('train: train_mssim={:.6f}'.format(sim))
-          writer.add_scalars('mssim', {'train': sim}, epoch)
+        #   sim = 1-train_mssim
+          log_info.append('train: train_mssim={:.6f}'.format(train_mssim))
+          writer.add_scalars('mssim', {'train': train_mssim}, epoch)
         if n_gpus > 1:
             model_ = model.module
         else:
@@ -409,10 +435,9 @@ def main(config_, save_path):
             'optimizer': optimizer_spec,
             'epoch': epoch
         }
-        torch.save(sv_file, os.path.join(save_path, f'epoch-last516.pth'))
+        torch.save(sv_file, os.path.join(save_path, f'epoch-last{day}.pth'))
 
         if (epoch_save is not None) and (epoch % epoch_save == 0):
-
             torch.save(sv_file,
                 os.path.join(save_path, 'epoch-{}-pyrenees.pth'.format(epoch)))
         if (epoch_val is not None) and (epoch % epoch_val == 0):
@@ -421,7 +446,7 @@ def main(config_, save_path):
             else:
                 model_ = model
             
-            save_folder=r'/content/drive/MyDrive/LMFDatas/evalrst'
+            save_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'evalrst'))
             save_folder = None # qumud
             val_res = eval_psnr(val_loader, model_,save_folder=save_folder,
                                 data_norm=config['data_norm'],

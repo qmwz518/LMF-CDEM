@@ -70,5 +70,5 @@ if __name__ == '__main__':
         pred = batched_predict(model, ((img - 0.5) / 0.5).unsqueeze(0),
                                coord.unsqueeze(0), cell_factor * cell.unsqueeze(0), bsize=30000)[0]
 
-    pred = (pred * 0.5 + 0.5).clamp(0, 1).view(h, w, 3).permute(2, 0, 1).cpu()
+    pred = (pred * 0.5 + 0.5).clamp(0, 1).view(h, w, 1).permute(2, 0, 1).cpu()
     transforms.ToPILImage()(pred).save(args.output)

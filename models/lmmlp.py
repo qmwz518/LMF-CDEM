@@ -35,7 +35,9 @@ class LMMLP(nn.Module):
             layers.append(nn.ReLU(inplace=True))
             lastv = hidden_dim
         if use_conv:
+            layers.append(nn.Conv2d(lastv, lastv))
             layers.append(nn.Conv2d(lastv, out_dim, 1))
+            
         else:
             layers.append(nn.Linear(lastv, out_dim))
         self.layers = nn.Sequential(*layers)

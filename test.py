@@ -41,7 +41,7 @@ def batched_predict(model, inp, coord, cell, bsize):
     return pred
 
 
-def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, window_size=0, scale_max=4, fast=False,
+def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, window_size=0, scale_max=None, fast=False,
               verbose=False, save_folder=None,btrend=False,coloss=False,channels=1):
     """
     Evaluate the Peak Signal-to-Noise Ratio (PSNR) of a model over a dataset loaded through a specified loader.
@@ -63,7 +63,7 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
     device, bGPU = get_Device()
 
     if data_norm is None or data_norm['norm_on'] == False:
-        norm_on = False  #qumuu
+        norm_on = False  #qumu
         data_norm = {
             'inp': {'sub': [0], 'div': [1]},
             'gt': {'sub': [0], 'div': [1]}
@@ -77,8 +77,7 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
     gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).to(device, non_blocking= bGPU)
     # print(f'eval_type:  {eval_type}')
     if eval_type is None:
-        scale = scale_max
-        metric_fn = utils.calc_psnr
+        metric_fn = utils.calc_psnr    #计算pnsr，数据flattend时使用
     elif eval_type.startswith('div2k'):
         scale = int(eval_type.split('-')[1])
         metric_fn = partial(utils.calc_psnr, dataset='div2k', scale=scale)
@@ -89,8 +88,8 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
         raise NotImplementedError
 
     if coloss:
-      # metric_fn = partial(calc_dem_metrics, data_range=1)
-      metric_fn = calc_dem_metrics
+      metric_fn = partial(calc_dem_metrics, data_range=1, scale=scale_max)
+
 
     # print('test82 metric_fn',metric_fn)
     val_res = utils.Averager()
@@ -190,7 +189,7 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
           val_res.add(res[0], inp.shape[0])
           val_ssim.add(res[1], inp.shape[0])
         else:
-          val_res.add(res.item(), inp.shape[0])
+          val_res.add(res, inp.shape[0])
 
         if verbose:
             pbar.set_description(f'val: {val_res.item():.4f} ssim: {val_ssim:.4f}')

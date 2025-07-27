@@ -16,6 +16,7 @@ np.sctypes = {
 
 import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
 from torch.optim import SGD, Adam, AdamW
 from torchvision import transforms
 import imageio
@@ -23,9 +24,9 @@ from imgaug.augmentables.heatmaps import HeatmapsOnImage
 from tensorboardX import SummaryWriter
 
 #by qumu
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
+from pytorch_msssim import ms_ssim, ssim
 
+import math
 
 class Averager():
 
@@ -207,6 +208,95 @@ def extract_trend_bilateral_filter(lr_dem, sigma_s=10, sigma_r=0.1):
     
     return trend_normalized
 
+class DEMGeoFeatsHybridLoss(nn.Module):
+    """
+    综合高程L1损失、坡度损失、坡向损失和hillshade损失的混合损失函数。
+    """
+    def __init__(self, 
+                 alpha=0.6,   # 高程L1损失权重
+                 beta=0.2,    # 坡度损失权重
+                 gamma=0.15,   # 坡向损失权重
+                 delta=0.05,   # hillshade损失权重
+                 data_range=1.0,
+                 simloss = True,
+                 eps=1e-6):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.delta = delta
+        self.data_range = data_range
+        self.eps = eps
+        self.l1 = nn.L1Loss()
+
+    def gradient(self, dem):
+        # 计算x和y方向的梯度
+        # dem: (B, 1, H, W)
+        dzdx = dem[..., :, 2:] - dem[..., :, :-2]
+        dzdx = dzdx / 2.0
+        dzdx = torch.nn.functional.pad(dzdx, (1,1,0,0), mode='replicate')
+        dzdy = dem[..., 2:, :] - dem[..., :-2, :]
+        dzdy = dzdy / 2.0
+        dzdy = torch.nn.functional.pad(dzdy, (0,0,1,1), mode='replicate')
+        return dzdx, dzdy
+
+    def compute_slope(self, dem):
+        dzdx, dzdy = self.gradient(dem)
+        slope = torch.atan(torch.sqrt(dzdx ** 2 + dzdy ** 2) + self.eps)
+        return slope
+
+    def compute_aspect(self, dem):
+        dzdx, dzdy = self.gradient(dem)
+        aspect = torch.atan2(dzdy, -dzdx + self.eps)
+        # 将范围调整到0~2pi
+        aspect = aspect % (2 * math.pi)
+        return aspect
+
+    def compute_geofeats(self, dem, azimuth=315, altitude=45):
+        # azimuth: 光源方位角，单位度，0为北，顺时针
+        # altitude: 光源高度角，单位度
+        dzdx, dzdy = self.gradient(dem)
+        # 转为弧度
+        az = math.radians(azimuth)
+        alt = math.radians(altitude)
+        slope = torch.atan(torch.sqrt(dzdx ** 2 + dzdy ** 2) + self.eps)
+        slope = slope % (0.5 * math.pi) / (0.5 * math.pi) #归一化到0~1
+        aspect = torch.atan2(dzdy, -dzdx + self.eps)
+        aspect = aspect % (2 * math.pi) 
+        # hillshade公式
+        hs = (torch.cos(alt) * torch.cos(slope) +
+              torch.sin(alt) * torch.sin(slope) * torch.cos(az - aspect))
+        # 归一化到0~1
+        hs = (hs - hs.min()) / (hs.max() - hs.min() + self.eps)
+        return slope, aspect, hs
+
+    def forward(self, pred, target):
+        # 高程L1损失
+        gt = target['gt']
+        gt_slope = target['slope']
+        gt_aspect = target['aspect']
+        gt_hs = target['hs']
+        pred_slope, pred_aspect, pred_hs = self.compute_geofeats(pred)
+
+        l1_loss = self.l1(pred, gt)
+        # 坡度损失
+        slope_loss = self.l1(pred_slope, gt_slope)
+        # 坡向损失（用cos差异，避免角度环绕问题）
+        # aspect_loss = self.l1(torch.cos(pred_aspect) - torch.cos(gt_aspect),
+        #                       torch.sin(pred_aspect) - torch.sin(gt_aspect))
+        aspect_cos_loss = self.l1(torch.cos(pred_aspect), torch.cos(gt_aspect))
+        aspect_sin_loss = self.l1(torch.sin(pred_aspect), torch.sin(gt_aspect))
+        aspect_loss = (aspect_cos_loss + aspect_sin_loss)/4.0
+        
+        # hillshade损失
+        hillshade_loss = self.l1(pred_hs, gt_hs)
+
+        total_loss = (self.alpha * l1_loss +
+                      self.beta * slope_loss +
+                      self.gamma * aspect_loss +
+                      self.delta * hillshade_loss)
+        return total_loss, l1_loss, slope_loss, aspect_loss, hillshade_loss
+
 
 def calculate_hillshade(dem, azimuth=315, altitude=45):
     """
@@ -292,25 +382,25 @@ def to_pixel_samples(img):
 '''
 
 
-def calc_psnr(sr, hr, dataset=None, scale=1, rgb_range=1):
-    diff = (sr - hr) / rgb_range
-    if dataset is not None:
-        if dataset == 'benchmark':
-            shave = scale
-            if diff.size(1) > 1:
-                gray_coeffs = [65.738, 129.057, 25.064]
-                convert = diff.new_tensor(gray_coeffs).view(1, 3, 1, 1) / 256
-                diff = diff.mul(convert).sum(dim=1)
-        elif dataset == 'div2k':
-            shave = scale + 6
-        else:
-            raise NotImplementedError
-        valid = diff[..., shave:-shave, shave:-shave]
-    else:
-        valid = diff
-    mse = valid.pow(2).mean()
-    pnsr = -10 * torch.log10(mse)
-    return pnsr
+# def calc_psnr(sr, hr, dataset=None, scale=1, rgb_range=1):
+#     diff = (sr - hr) / rgb_range
+#     if dataset is not None:
+#         if dataset == 'benchmark':
+#             shave = scale
+#             if diff.size(1) > 1:
+#                 gray_coeffs = [65.738, 129.057, 25.064]
+#                 convert = diff.new_tensor(gray_coeffs).view(1, 3, 1, 1) / 256
+#                 diff = diff.mul(convert).sum(dim=1)
+#         elif dataset == 'div2k':
+#             shave = scale + 6
+#         else:
+#             raise NotImplementedError
+#         valid = diff[..., shave:-shave, shave:-shave]
+#     else:
+#         valid = diff[..., scale:-scale, scale:-scale]
+#     mse = valid.pow(2).mean()
+#     pnsr = -10 * torch.log10(mse)
+#     return pnsr
 
 def evaluate_model(model, dataloader, device,scale=1):
     model.eval()
@@ -335,14 +425,19 @@ def get_Device():
   return curdevice, bGPU
         
 def calc_psnr(sr, hr, scale=None, data_range=1.0):
+    # 计算sr和hr之间的均方误差
     diff = (sr - hr) / data_range
+    # 如果scale为None，则valid为diff
     if scale is None:
         valid = diff
+    # 否则，valid为diff去掉scale大小的边界
     else:
         shave = scale
         valid = diff[..., shave:-shave, shave:-shave]
 
+    # 计算valid的平方和的平均值
     mse = valid.pow(2).mean()
+    # 返回-10乘以mse的对数
     return -10 * torch.log10(mse)
 
 def data2dem(data, file_pth, heatmap_flag=False):
@@ -386,10 +481,10 @@ def plot_dem(dem_data, title='Digital Elevation Model'):
   plt.ylabel('Y')
   plt.show()
 
-import math
-from torchmetrics.functional import peak_signal_noise_ratio, structural_similarity_index_measure
 
-def calc_dem_metrics(pred_tensor, true_tensor, data_range=None,OnlyPSNR=True):
+
+#本函数只在coloss为True时使用，也即预测矩形DEM时使用，可只计算pnsr
+def calc_dem_metrics(pred_tensor, true_tensor, data_range=None,OnlyPSNR=False,scale=None):
     """
     计算预测的超分辨率DEM与真实DEM之间的PSNR和SSIM指标。
     适用于PyTorch训练过程中的张量数据。
@@ -398,42 +493,45 @@ def calc_dem_metrics(pred_tensor, true_tensor, data_range=None,OnlyPSNR=True):
         pred_tensor (torch.Tensor): 模型预测的DEM张量，形状为[B, 1, H, W]或[B, H, W]
         true_tensor (torch.Tensor): 真实DEM张量，形状为[B, 1, H, W]或[B, H, W]
         data_range (float, optional): 数据范围，用于PSNR和SSIM计算。如不提供，将自动计算。
+       
         
     返回:
         dict: 包含PSNR和SSIM指标的字典
     """
-    # 确保输入是张量类型
-    if not isinstance(pred_tensor, torch.Tensor) or not isinstance(true_tensor, torch.Tensor):
-        raise TypeError("输入必须是PyTorch张量")
+    # # 确保输入是张量类型
+    # if not isinstance(pred_tensor, torch.Tensor) or not isinstance(true_tensor, torch.Tensor):
+    #     raise TypeError("输入必须是PyTorch张量")
     
-    # 确保张量在同一设备上
-    if pred_tensor.device != true_tensor.device:
-        raise ValueError(f"预测张量和真实张量必须在同一设备上: {pred_tensor.device} vs {true_tensor.device}")
+    # # 确保张量在同一设备上
+    # if pred_tensor.device != true_tensor.device:
+    #     raise ValueError(f"预测张量和真实张量必须在同一设备上: {pred_tensor.device} vs {true_tensor.device}")
     
    
-    # 验证形状
-    if pred_tensor.shape != true_tensor.shape:
-        raise ValueError(f"预测张量和真实张量形状必须一致: {pred_tensor.shape} vs {true_tensor.shape}")
-    # print(f'pred_tensor.shape={pred_tensor.shape}')
-    pred_tensor.squeeze_(-1)
-    true_tensor.squeeze_(-1)
-    bs = pred_tensor.shape[0]
-    side_length = int(math.sqrt(pred_tensor.shape[-1]))
-    pred_tensor = pred_tensor.view(bs,-1, side_length,side_length)
-    true_tensor = true_tensor.view(bs,-1, side_length,side_length)
-
-    # 如果未提供data_range，则自动计算
+    # # 验证形状
+    # if pred_tensor.shape != true_tensor.shape:
+    #     raise ValueError(f"预测张量和真实张量形状必须一致: {pred_tensor.shape} vs {true_tensor.shape}")
+    # # print(f'pred_tensor.shape={pred_tensor.shape}')
+    # # pred_tensor.squeeze_(-1)
+    # # true_tensor.squeeze_(-1)
+    # # bs = pred_tensor.shape[0]
+    # # if flattend:   #如果flattend为True，则将张量为展平状态
+    # #     side_length  = int(math.sqrt(pred_tensor.shape[-1]))
+    # #     pred_tensor = pred_tensor.view(bs,-1, side_length,side_length)
+    # #     true_tensor = true_tensor.view(bs,-1, side_length,side_length)
+    # # 如果未提供data_range，则自动计算
     if data_range is None:
         data_range = float(torch.max(true_tensor) - torch.min(true_tensor))
     
     # 计算PSNR
-    psnr_value = peak_signal_noise_ratio(pred_tensor, true_tensor, data_range=data_range)
-    if OnlyPSNR:
-      return psnr_value.item()
-    # 计算SSIM
-    ssim_value = structural_similarity_index_measure(pred_tensor, true_tensor, data_range=data_range)
+    # psnr_value = peak_signal_noise_ratio(pred_tensor, true_tensor, data_range=data_range)
+    psnr_value = calc_psnr(pred_tensor, true_tensor, data_range=data_range,scale = scale)
     
-    return psnr_value.item(),ssim_value.item()
+    if OnlyPSNR:
+      return psnr_value
+    # 计算SSIM
+    ssim_value = ssim(pred_tensor, true_tensor, data_range=data_range, win_size=5)
+    ssim_value = ssim_value.mean().item()   
+    return psnr_value,ssim_value
 
 # 使用示例
 if __name__ == "__main__":

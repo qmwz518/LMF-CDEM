@@ -42,6 +42,7 @@ val_dataset:
   batch_size: 32
 trend: false   #true   #使用高程趋势面和高程残差进行训练 qumu
 bQBias: false
+loss_type: DEMGeoFeatsHybridLoss # DEMGeoFeatsHybridLoss DEMGeoFeatsLoss 
 coloss: true  # 
 data_norm:
   norm_on: false # true时使用(-1,+1)进行训练，false时使用(0,1)进行训练

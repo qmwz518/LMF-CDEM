@@ -10,6 +10,7 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
 from datasets import register
+import utils
 from utils import to_pixel_samples
 from utils import make_coord, resize_fn,Trend_of_DEM,calculate_hillshade
 
@@ -45,6 +46,7 @@ class DEMImplicitDownsampled(Dataset):
         self.trend = trend
         self.bQBias = bQBias
         self.augment = augment
+        self.hillshaecalc = utils.DEMGeoFeatsHybridLoss()
 
 
     def __len__(self):
@@ -93,14 +95,11 @@ class DEMImplicitDownsampled(Dataset):
                 crop_lr = augment(crop_lr)
                 
 
-            hillshade, slope, aspect = calculate_hillshade(crop_hr) 
+            # hillshade, slope, aspect = calculate_hillshade(crop_hr) 
+            slope, aspect, hillshade = self.hillshaecalc.compute_geofeats(crop_hr)
+
             hr_coord = make_coord(crop_hr.shape[-2:],flatten=bflatten)
-            #25.1.5
-            if self.trend:
-
-              trenddem = torch.tensor(Trend_of_DEM(crop_lr.numpy()))
               # print('100 trenddem.shape:',trenddem.shape)
-
             x0 = random.randint(0, crop_hr.shape[-2] - self.sample_q) #这里的缩放比例s使用其不取LR图的边缘一像素位置
             y0 = random.randint(0, crop_hr.shape[-1] - self.sample_q)
             x1 = x0+self.sample_q #此时sample_q为LR边长值
@@ -111,15 +110,21 @@ class DEMImplicitDownsampled(Dataset):
             slope = slope[:, x0:x1,y0:y1]
             aspect = aspect[:, x0:x1,y0:y1]
             global_coord = global_coord[x0:x1,y0:y1,:]
-            if self.trend and self.bQBias:
-              hrTrenddem = F.grid_sample(trenddem.unsqueeze(0), hr_coord.unsqueeze(0),mode='nearest', align_corners=False,padding_mode='border')
-              hrTrenddem = hrTrenddem.squeeze(0)
-              # hrTrenddem = hrTrenddem[:, x0:x1,y0:y1] 
-
+            #25.1.5
+            if self.trend:
+              trenddem = torch.tensor(Trend_of_DEM(crop_lr.numpy()))
+            if self.bQBias:
+              if self.trend:
+                hrBasedem = F.grid_sample(trenddem.unsqueeze(0), hr_coord.unsqueeze(0),mode='nearest', align_corners=False,padding_mode='border')
+                hrBasedem = hrBasedem.squeeze(0)
+              else:
+                hrBasedem = F.grid_sample(crop_lr.unsqueeze(0), hr_coord.unsqueeze(0),mode='nearest', align_corners=False,padding_mode='border')
+                hrBasedem = hrBasedem.squeeze(0)
+                # hrTrenddem = hrTrenddem[:, x0:x1,y0:y1] 
             cell = torch.ones_like(hr_coord.permute(2,0,1)) #[2,H,W]
             cell[0,...] *= 2 / crop_hr.shape[-2]  #会与inp进行.cat(),
             cell[1,...] *= 2 / crop_hr.shape[-1]
-        else:   #不使用随机矩形范围值
+        else:   #不使用随机矩形范围值，flatternd
             img_coord, img_value = to_pixel_samples(img.contiguous())
             img_coord = img_coord.permute(1,0).view([-1, *(img.shape[1:])])
             if self.inp_size is None:
@@ -156,17 +161,25 @@ class DEMImplicitDownsampled(Dataset):
             if self.trend:
                 trenddem = torch.tensor(Trend_of_DEM(crop_lr.numpy()))
 
-            if self.sample_q is not None:  #
+            if self.sample_q is not None:  #  采样数统一为sample_q*sample_q
                 sample_lst = np.random.choice(
                     len(hr_coord), self.sample_q**2, replace=False)
                 hr_coord = hr_coord[sample_lst]
                 hr_value = hr_value[sample_lst]
                 global_coord = global_coord[sample_lst]
                 
-                if self.trend == True and self.bQBias:
-                  hrTrenddem = F.grid_sample(trenddem.unsqueeze(0), hr_coord.unsqueeze(0).unsqueeze(0).flip(-1),mode='nearest', align_corners=False, padding_mode = 'border')[:, :, 0, :].permute(0, 2, 1)
+                # if self.trend == True and self.bQBias:
+                #   hrTrenddem = F.grid_sample(trenddem.unsqueeze(0), hr_coord.unsqueeze(0).unsqueeze(0).flip(-1),mode='nearest', align_corners=False, padding_mode = 'border')[:, :, 0, :].permute(0, 2, 1)
                   
-                  hrTrenddem = hrTrenddem.squeeze(0)
+                #   hrTrenddem = hrTrenddem.squeeze(0)
+                
+                if self.bQBias:
+                    if self.trend:
+                        hrBasedem = F.grid_sample(trenddem.unsqueeze(0), hr_coord.unsqueeze(0),mode='nearest', align_corners=False,padding_mode='border')
+                        hrBasedem = hrBasedem.squeeze(0)
+                    else:
+                        hrBasedem = F.grid_sample(crop_lr.unsqueeze(0), hr_coord.unsqueeze(0),mode='nearest', align_corners=False,padding_mode='border')
+                        hrBasedem = hrBasedem.squeeze(0)                
                   # print(len(sample_lst))
 
                 cell = torch.ones_like(hr_coord)
@@ -200,8 +213,8 @@ class DEMImplicitDownsampled(Dataset):
         if self.trend:
             results['DEMtrend'] = trenddem
             results['inp'] -= trenddem
-            if self.bQBias:
-                results['hrDEMtrend'] = hrTrenddem
+        if  self.bQBias:
+            results['hrBasedem'] = hrBasedem
         return results, idx
 
 
