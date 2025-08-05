@@ -28,7 +28,9 @@ class LMLIIF(nn.Module):
         self.max_scale = max_scale  # Max training scale
         self.mod_input = mod_input  # Set to True if use compressed latent code
         self.encoder_spec = encoder_spec
-        self.encoder = models.make(encoder_spec, args=dict(bQBias = bQBias))
+        self.encoder = models.make(encoder_spec)
+        # self.encoder = models.make(encoder_spec, args=dict(bQBias = bQBias))
+        
         self.btrend = btrend #qumu 
         self.device = get_Device()
         self.coloss = coloss   # by qumu 330 gt使用[h, w] not [h* w]
