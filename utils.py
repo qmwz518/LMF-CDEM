@@ -252,7 +252,7 @@ class DEMGeoFeatsHybridLoss(nn.Module):
         aspect = aspect % (2 * math.pi)
         return aspect
 
-    def compute_geofeats(self, dem, azimuth=315, altitude=45):
+    def compute_geofeats_old(self, dem, azimuth=315, altitude=45):
         # azimuth: 光源方位角，单位度，0为北，顺时针
         # altitude: 光源高度角，单位度
         dzdx, dzdy = self.gradient(dem)
@@ -267,6 +267,27 @@ class DEMGeoFeatsHybridLoss(nn.Module):
         hs = (torch.cos(alt) * torch.cos(slope) +
               torch.sin(alt) * torch.sin(slope) * torch.cos(az - aspect))
         # 归一化到0~1
+        hs = (hs - hs.min()) / (hs.max() - hs.min() + self.eps)
+        return slope, aspect, hs
+
+    
+    def compute_geofeats(self, dem, azimuth=315, altitude=45):
+        device = dem.device  # 获取输入 DEM 的设备（CPU/GPU）
+        dtype = dem.dtype    # 获取数据类型（如 float32）
+
+        # 将角度转换为弧度，并创建为与 DEM 同设备的张量
+        az = torch.tensor(math.radians(azimuth), device=device, dtype=dtype)
+        alt = torch.tensor(math.radians(altitude), device=device, dtype=dtype)
+
+        dzdx, dzdy = self.gradient(dem)
+        slope = torch.atan(torch.sqrt(dzdx**2 + dzdy**2) + self.eps)
+        slope = slope % (0.5 * math.pi) / (0.5 * math.pi)  # 归一化到 0~1
+        aspect = torch.atan2(dzdy, -dzdx + self.eps)
+        aspect = aspect % (2 * math.pi) 
+
+        # 所有参数已转为 Tensor，可安全计算
+        hs = (torch.cos(alt) * torch.cos(slope) +
+            torch.sin(alt) * torch.sin(slope) * torch.cos(az - aspect))
         hs = (hs - hs.min()) / (hs.max() - hs.min() + self.eps)
         return slope, aspect, hs
 
