@@ -267,7 +267,7 @@ def train(train_loader, model, optimizer, epoch): #utils.calc_psnr
 
     if coloss:
         loss_type = config.get('loss_type')
-        if loss_type == 'DEMGeoFeatsHybridLoss':
+        if loss_type == 'DEMGeoFeatsHybridLoss' and bQBias is False: # 当bQBias为True，预测DEM残差值，不使用DEMGeoFeatsHybridLoss
             loss_fn = utils.DEMGeoFeatsHybridLoss()
         else:
             loss_fn = SIML1Loss()
@@ -293,31 +293,32 @@ def train(train_loader, model, optimizer, epoch): #utils.calc_psnr
         # 归一化处理
        
         gt = batch['gt'] 
-        if btrend == False:
+        if btrend == False:   #本身是0-1的值，如何norm_on为真，则再次归一化为-1~1间的值
           inp = (batch['inp'] - inp_sub) / inp_div if norm_on else batch['inp']
           pred = model(inp, batch['coord'], batch['cell'])
-          pred_denorm = pred * gt_div + gt_sub if norm_on else pred
+          pred_denorm = pred * gt_div + gt_sub if norm_on else pred #如何norm_on为真，将model输出从-1~1转换回0~1
         #   pred_denorm.clamp_(0, 1) # by qumu ???2025年7月9日
         else:
-          #bQBias 时pred是预测的高程残差值
           inp = batch['inp']
           Trend = batch.get('DEMtrend')
           pred = model(inp, batch['coord'], batch['cell'], Trend)
           pred_denorm = (torch.tanh(pred) + 1) / 2 if not bQBias else pred # 0-1  
            
         # 损失计算
-
+        #bQBias 时pred是预测的高程残差值
         if bQBias:
-            hrBase = batch.get('hrBasedem')
+            hrBase = batch.get('hrBasedem')  #hrBasedem 低分辨率DEM细化采样得到
             # loss, ms_ssim_loss, l1_loss = loss_fn(pred, gt - hrBase)
-            All_loss = loss_fn(pred, gt - hrBase)
+            loss = loss_fn(pred, gt - hrBase)   # 预测的高程残差值，与低分辨率DEM细化采样得到的高程残差值的差值
         else:
-            All_loss = loss_fn(pred_denorm, gt)
+            # All_loss = loss_fn(pred_denorm, gt)
+            if coloss:
+                All_loss = loss_fn(pred_denorm, batch)
+                loss = All_loss[0]
+                slopeloss = All_loss[2]
+            else:
+                loss = loss_fn(pred_denorm, gt)
 
-        if coloss:
-            loss, ms_ssim_loss, l1_loss = All_loss
-        else:
-            loss = All_loss
         # 反向传播与参数更新
         optimizer.zero_grad()
         loss.backward()
@@ -333,9 +334,14 @@ def train(train_loader, model, optimizer, epoch): #utils.calc_psnr
         iteration += 1
         train_psnr.add(PSNR)
         train_loss.add(loss.item())
-        train_msssim.add(1 - ms_ssim_loss.item()) if coloss else 0
+        train_msssim.add(slopeloss) if coloss else 0
+
+        # train_msssim.add(1 - ms_ssim_loss.item()) if coloss else 0
+        # train_msssim.add(1 - ms_ssim_loss.item()) if coloss else 0
+
     if coloss:
       return train_loss.item(), train_psnr.item(),train_msssim.item() # 假设使用平均而非最后值
+      
     else:
       return train_loss.item(), train_psnr.item() # 假设使用平均而非最后值
 
@@ -405,10 +411,12 @@ def main(config_, save_path):
         log_info = ['epoch {}/{}'.format(epoch, epoch_max)]
 
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
+        traino = train(train_loader, model, optimizer, epoch)      
         if coloss:
-            train_loss, train_psnr, train_mssim = train(train_loader, model, optimizer, epoch)
+            train_loss, train_psnr, train_mssim = traino[0],traino[1],traino[2]
         else: 
-            train_loss, train_psnr = train(train_loader, model, optimizer, epoch)
+            train_loss, train_psnr = traino[0],traino[1]
 
         if lr_scheduler is not None:  #qumu 330
             #cosplateau # stepLR cosine plateau
@@ -479,7 +487,7 @@ def main(config_, save_path):
         log(', '.join(log_info))
         writer.flush()
     log('Training Time:',format_time(timer.t()))
-    torch.save(sv_file, os.path.join(save_path, 'epoch-pyrenees-last516.pth'))
+    torch.save(sv_file, os.path.join(save_path, f'epoch-last{day}.pth'))
     # torch.save(sv_file, os.path.join(save_path, 'epoch-pyrenees-best320.pth')) #qumud
 
 
